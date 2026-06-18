@@ -25,7 +25,7 @@ jobs:
         env:
           TOKEN_JSON: ${{ secrets.TOKEN_JSON }}     # contents of token_ventas.json
           MAIL_TO: "raj.mohan@6dtech.co.in"
-          MAIL_CC: "hari.krishnan@6dtech.co.in"
+          MAIL_CC: "hari.krishnan@6dtech.co.in,parvath.karthik@6dtech.co.in,abhinav.krishnan@6dtech.co.in,ashwini.singh@6dtech.co.in,narendhar.singh@6dtech.co.in,chandrakantbharat.korukonda@6dtech.co.in,k.chaitanya@6dtech.co.in"
           MAIL_BCC: ""
           VENTAS_WORKDIR: ${{ runner.temp }}
         run: python run_daily.py
