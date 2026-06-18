@@ -1,9 +1,10 @@
 name: Ventas Daily Dashboard
 
+# 10:00 IST = 04:30 UTC. GitHub cron is always UTC.
 on:
   schedule:
-    - cron: "30 4 * * *"      # 10:00 IST (UTC+5:30)
-  workflow_dispatch: {}        # manual "Run workflow" button
+    - cron: "30 4 * * *"
+  workflow_dispatch: {}        # adds a manual "Run workflow" button
 
 jobs:
   send-dashboard:
@@ -17,12 +18,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install LibreOffice + poppler (for the inline slide image)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libreoffice-impress poppler-utils
+
       - name: Install dependencies
         run: pip install -r cloudrun/requirements.txt
 
       - name: Run Ventas pipeline (fetch -> build -> Drive -> email)
         env:
-          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}     # contents of token_ventas.json
           MAIL_TO: "raj.mohan@6dtech.co.in"
           MAIL_CC: "hari.krishnan@6dtech.co.in"
           MAIL_BCC: ""
