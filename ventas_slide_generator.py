@@ -216,36 +216,87 @@ def _agg_stock(rows):
 
 def _classify(path):
     n=Path(path).name.upper()
-    if "PRIMARY" in n: return "Primary Sales Summary"
-    if "POS"     in n: return "POS Sales Summary"
-    if "STOCK" in n or "TRANSFER" in n: return "Stock Transfer Summary"
+    if "PRIMARY_SALE" in n: return "Primary Sales Summary"
+    if "POS_SALE" in n: return "POS Sales Summary"
+    if "STOCK_TRANSFER" in n or ("STOCK" in n and "TRANSFER" in n): return "Stock Transfer Summary"
+    return None
+
+# Extra sections added to the report: (filename_key, section_name, txn_label, [(milestone,col)])
+EXTRA_SECTIONS = [
+    ("PAYMENT_RECEIPT", "Payment Receipt Summary", "Payment Receipt",
+        [("Count","TOTAL_COUNT"),("Amount","TOTAL_AMOUNT")]),
+    ("CR_DR_NOTE", "Credit / Debit Note Summary", "Credit / Debit Note",
+        [("CR Txns","CR_TRANSACTIONS"),("CR Amount","CR_AMOUNT"),
+         ("DR Txns","DR_TRANSACTIONS"),("DR Amount","DR_AMOUNT")]),
+    ("INVOICE_POSTING", "Invoice Posting Summary", "Invoice Posting",
+        [("Primary Sale","PRIMARY_SALE"),("Primary Return","PRIMARY_RETURN"),
+         ("POS Sale","POS_SALE"),("POS Return","POS_RETURN"),("CR/DR Note","CR_DR_NOTE")]),
+    ("RECEIPT_POSTING", "Receipt Posting Summary", "Receipt Posting",
+        [("POS Receipt","POS_RECEIPT"),("Payment Receipt","PAYMENT_RECEIPT"),
+         ("POS Rev Receipt","POS_REV_RECEIPT"),("Pay Rev Receipt","PAY_REV_RECEIPT")]),
+    ("USER_LOGIN", "User Login Summary", "User Login",
+        [("Users Logged In","USERS_LOGGED_IN")]),
+    ("HBB_FRACTAL", "HBB Fractal Summary", "HBB Fractal",
+        [("Records","RECORDS")]),
+]
+
+def _classify_extra(path):
+    n=Path(path).name.upper()
+    for fkey,name,txn,metrics in EXTRA_SECTIONS:
+        if fkey in n:
+            return (name, txn, metrics)
+    # also match by alt filename hints
+    if "CR_DR" in n or "CREDIT" in n or "DEBIT" in n: return ("Credit / Debit Note Summary","Credit / Debit Note",EXTRA_SECTIONS[1][3])
+    if "INVOICE" in n: return ("Invoice Posting Summary","Invoice Posting",EXTRA_SECTIONS[2][3])
+    if "RECEIPT_POST" in n or "RECEIPT" in n and "PAYMENT" not in n: return ("Receipt Posting Summary","Receipt Posting",EXTRA_SECTIONS[3][3])
+    if "LOGIN" in n: return ("User Login Summary","User Login",EXTRA_SECTIONS[4][3])
+    if "HBB" in n or "FRACTAL" in n: return ("HBB Fractal Summary","HBB Fractal",EXTRA_SECTIONS[5][3])
     return None
 
 def csv_to_data(csv_paths, report_date=""):
-    """Build the same data dict the renderer expects, from the latest mail's CSVs.
-    Aggregates per ORDER_DATE across all order types (fixes undercount)."""
+    """Build the data dict the renderer expects from the latest mail's CSVs.
+    Sales/stock are aggregated per date across order types; the extra sections
+    (payment receipt, CR/DR note, postings, user login, HBB fractal) are summed
+    per date across their numeric columns."""
     data={}
     all_dates=[]
     for path in csv_paths:
         key=_classify(path)
-        if not key:
-            print(f"WARN: could not classify {path} by filename; skipping")
+        if key:
+            rows=_read_csv_rows(path)
+            if not rows:
+                print(f"WARN: {path} is empty"); continue
+            print(f"  {Path(path).name}: {len(rows)} rows, cols={list(rows[0].keys())}")
+            if key=="Stock Transfer Summary":
+                agg=_agg_stock(rows)
+                hdr=["ORDER_DATE","APPROVED","DELIVERED","GR_PENDING","CREATED","TOTAL_REQUESTS"]
+            else:
+                agg=_agg_sales(rows)
+                hdr=["ORDER_DATE","COMPLETED","INPROGRESS","PENDING","TOTAL_COUNT"]
+            out=[hdr]
+            for d in sorted(agg):
+                out.append([d]+[str(x) for x in agg[d]]); all_dates.append(d)
+            data[key]=out
             continue
-        rows=_read_csv_rows(path)
-        if not rows:
-            print(f"WARN: {path} is empty"); continue
-        print(f"  {Path(path).name}: {len(rows)} rows, cols={list(rows[0].keys())}")
-        if key=="Stock Transfer Summary":
-            agg=_agg_stock(rows)
-            hdr=["ORDER_DATE","APPROVED","DELIVERED","GR_PENDING","CREATED","TOTAL_REQUESTS"]
-        else:
-            agg=_agg_sales(rows)
-            hdr=["ORDER_DATE","COMPLETED","INPROGRESS","PENDING","TOTAL_COUNT"]
-        out=[hdr]
-        for d in sorted(agg):
-            out.append([d]+[str(x) for x in agg[d]])
-            all_dates.append(d)
-        data[key]=out
+        ex=_classify_extra(path)
+        if ex:
+            name, txn, metrics = ex
+            cols=[c for _,c in metrics]
+            rows=_read_csv_rows(path)
+            agg={}
+            for r in (rows or []):
+                d=_date_key(r)
+                if not d: continue
+                a=agg.setdefault(d,[0]*len(cols))
+                for mi,c in enumerate(cols):
+                    a[mi]+=_to_int(r.get(c))
+            hdr=["ORDER_DATE"]+cols
+            out=[hdr]+[[d]+[str(x) for x in agg[d]] for d in sorted(agg)]
+            for d in sorted(agg): all_dates.append(d)
+            data[name]=out
+            print(f"  {Path(path).name}: {len(rows or [])} rows -> {name}")
+            continue
+        print(f"WARN: could not classify {path} by filename; skipping")
     rd=report_date or (max(all_dates) if all_dates else datetime.today().strftime("%Y-%m-%d"))
     # Keep only the fixed 7-day window ending on report_date so KPI 7-DAY TOTAL
     # matches the chart window.
@@ -509,7 +560,168 @@ def _row_lbl(slide,text,x,y,w,h):
     r.font.size=Pt(8.5); r.font.bold=True; r.font.color.rgb=WHITE
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def generate_slide(html_list, report_date, output_path, data=None, png_path=None):
+def render_table_png(data, rd, out_png, dpi=150):
+    """Render slide-2 (Weekly Transaction Trend table) as a standalone PNG using
+    matplotlib only (no LibreOffice). Mirrors the PPTX table styling."""
+    st =data.get("Stock Transfer Summary",[]); pos=data.get("POS Sales Summary",[]); pri=data.get("Primary Sales Summary",[])
+    try:
+        end=datetime.strptime(rd,"%Y-%m-%d")-timedelta(days=1)
+        dates=[(end-timedelta(days=6-i)).strftime("%Y-%m-%d") for i in range(7)]
+    except Exception:
+        dates=sorted(set(_dates(pri)+_dates(pos)+_dates(st)))
+    green="#A9D08E"; amber="#FFE599"; orange="#F8CBAD"; red="#F4A6A6"; blue="#BDD7EE"; purple="#D9C3E8"
+    hdrc="#2E75B6"; txn_bg="#E2EFDA"; white="#FFFFFF"; neutral="#DDEBF7"; datafill="#C6EFCE"
+    label_color={
+        "Completed":green,"InProgress":amber,"Pending":red,
+        "Created":orange,"Approved":amber,"Delivered":green,"GR Pending":red,
+        "Count":blue,"Amount":purple,
+        "CR Txns":green,"CR Amount":blue,"DR Txns":red,"DR Amount":orange,
+        "Primary Sale":green,"Primary Return":red,"POS Sale":blue,"POS Return":orange,"CR/DR Note":amber,
+        "POS Receipt":green,"Payment Receipt":blue,"POS Rev Receipt":red,"Pay Rev Receipt":orange,
+        "Users Logged In":blue,"Records":blue,
+    }
+    spec=[("Primary Sale",[("Completed","COMPLETED"),("InProgress","INPROGRESS"),("Pending","PENDING")],pri),
+          ("POS Sale",[("Completed","COMPLETED"),("InProgress","INPROGRESS"),("Pending","PENDING")],pos),
+          ("Stock Transfer",[("Created","CREATED"),("Approved","APPROVED"),("Delivered","DELIVERED"),("GR Pending","GR_PENDING")],st)]
+    for _fkey,_name,_txn,_metrics in EXTRA_SECTIONS:
+        spec.append((_txn, list(_metrics), data.get(_name, [])))
+    spec.sort(key=lambda t: 0 if t[0]=="User Login" else 1)
+
+    headers=["Transaction Type","MileStone"]+[_short(d) for d in dates]
+    cellText=[headers]; cellColours=[[hdrc]*len(headers)]; rowmeta=[("hdr",0)]
+    for txn,miles,rows in spec:
+        n=len(miles); mid=n//2
+        for k,(mlabel,col) in enumerate(miles):
+            txt=[(txn if k==mid else ""), mlabel]; cols=[txn_bg, label_color.get(mlabel,neutral)]
+            for d in dates:
+                vv=_val(rows,d,col); txt.append(str(vv)); cols.append(datafill if vv>0 else white)
+            cellText.append(txt); cellColours.append(cols); rowmeta.append(("data",0))
+    nrows=len(cellText)
+
+    fig=plt.figure(figsize=(13.333,7.5),dpi=dpi); fig.patch.set_facecolor("#06224A")
+    fig.text(0.012,0.965,"Weekly Transaction Trend Report",color="white",fontsize=21,fontweight="bold",ha="left",va="center")
+    fig.text(0.012,0.933,"Airtel Congo (CG)    |    Report Date: %s    |    Last 7 Days (excl. report day)"%_short_date_long(rd),
+             color="#B0C4DE",fontsize=10,ha="left",va="center")
+    fig.text(0.988,0.95,"6D Technologies",color="white",fontsize=13,fontweight="bold",ha="right",va="center")
+    ax=fig.add_axes([0.008,0.02,0.984,0.88]); ax.axis("off")
+    colW=[0.16,0.145]+[(1-0.305)/len(dates)]*len(dates)
+    tbl=ax.table(cellText=cellText, cellColours=cellColours, colWidths=colW, cellLoc='center', loc='center')
+    tbl.auto_set_font_size(False)
+    for (r,c),cell in tbl.get_celld().items():
+        cell.set_height(1.0/nrows); cell.set_edgecolor("#9DB4CC"); cell.set_linewidth(0.5)
+        t=cell.get_text()
+        if r==0:
+            t.set_color("white"); t.set_fontweight("bold"); t.set_fontsize(12)
+        else:
+            t.set_color("#1A1A1A"); t.set_fontsize(12)
+            t.set_fontweight("bold" if c==0 else "normal")
+    fig.savefig(str(out_png),dpi=dpi,facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print("Table PNG rendered (matplotlib):",out_png)
+    return out_png
+
+def add_trend_table_slide(prs, data, rd):
+    """Second slide: Weekly Transaction Trend table for Primary Sale, POS Sale,
+    Stock Transfer (milestones x Total x per-day columns)."""
+    from pptx.enum.text import MSO_ANCHOR
+    st =data.get("Stock Transfer Summary",[]); pos=data.get("POS Sales Summary",[]); pri=data.get("Primary Sales Summary",[])
+    try:
+        end=datetime.strptime(rd,"%Y-%m-%d")-timedelta(days=1)
+        dates=[(end-timedelta(days=6-i)).strftime("%Y-%m-%d") for i in range(7)]
+    except Exception:
+        dates=sorted(set(_dates(pri)+_dates(pos)+_dates(st)))
+    SW=prs.slide_width; SH=prs.slide_height
+    slide=prs.slides.add_slide(prs.slide_layouts[6]); _bg(slide,BG)
+    HDR_H=Inches(0.55)
+    bp=_asset("banner-gradient.png")
+    if bp.exists(): slide.shapes.add_picture(str(bp),0,0,SW,HDR_H)
+    else: _rect(slide,0,0,SW,HDR_H,fc=CARD_BLUE)
+    _txt(slide,"Weekly Transaction Trend Report",Inches(0.25),Inches(0.08),Inches(10),Inches(0.4),sz=20,bold=True)
+    _txt(slide,f"Airtel Congo (CG)   |   Report Date: {_short_date_long(rd)}   |   Last 7 Days (excl. report day)",
+         Inches(0.25),Inches(0.40),Inches(10),Inches(0.18),sz=8.5,col=LGREY)
+    lg=_asset("6d-logo-white.png")
+    if lg.exists():
+        pic=slide.shapes.add_picture(str(lg),0,Inches(0.07),height=Inches(0.38)); pic.left=SW-pic.width-Inches(0.2)
+
+    green=RGBColor(0xA9,0xD0,0x8E); amber=RGBColor(0xFF,0xE5,0x99)
+    orange=RGBColor(0xF8,0xCB,0xAD); red=RGBColor(0xF4,0xA6,0xA6)
+    blue=RGBColor(0xBD,0xD7,0xEE); purple=RGBColor(0xD9,0xC3,0xE8)
+    hdr_bg=RGBColor(0x2E,0x75,0xB6)            # bright blue header
+    txn_bg=RGBColor(0xE2,0xEF,0xDA)
+    white=RGBColor(0xFF,0xFF,0xFF); black=RGBColor(0x1A,0x1A,0x1A)
+    neutral=RGBColor(0xDD,0xEB,0xF7)
+    datafill=RGBColor(0xC6,0xEF,0xCE)          # light green for cells that have data
+    # Colour by milestone LABEL: same label -> same colour across Transaction Types,
+    # while every label within a single group is distinct (no repeats per group).
+    label_color={
+        "Completed":green,"InProgress":amber,"Pending":red,
+        "Created":orange,"Approved":amber,"Delivered":green,"GR Pending":red,
+        "Count":blue,"Amount":purple,
+        "CR Txns":green,"CR Amount":blue,"DR Txns":red,"DR Amount":orange,
+        "Primary Sale":green,"Primary Return":red,"POS Sale":blue,"POS Return":orange,"CR/DR Note":amber,
+        "POS Receipt":green,"Payment Receipt":blue,"POS Rev Receipt":red,"Pay Rev Receipt":orange,
+        "Users Logged In":blue,"Records":blue,
+    }
+
+    spec=[("Primary Sale",[("Completed","COMPLETED"),("InProgress","INPROGRESS"),("Pending","PENDING")],pri),
+          ("POS Sale",[("Completed","COMPLETED"),("InProgress","INPROGRESS"),("Pending","PENDING")],pos),
+          ("Stock Transfer",[("Created","CREATED"),("Approved","APPROVED"),("Delivered","DELIVERED"),("GR Pending","GR_PENDING")],st)]
+    for _fkey,_name,_txn,_metrics in EXTRA_SECTIONS:
+        spec.append((_txn, list(_metrics), data.get(_name, [])))
+    spec.sort(key=lambda t: 0 if t[0]=="User Login" else 1)   # User Login first
+    rows_spec=[]
+    for txn,miles,rows in spec:
+        for k,(mlabel,col) in enumerate(miles):
+            rows_spec.append((txn,mlabel,col,rows,k))
+    ncols=2+len(dates); nrows=1+len(rows_spec)
+    tx=Inches(0.22); ty=Inches(0.60); tw=SW-Inches(0.44); th=Inches(6.82); FS=13
+    tbl=slide.shapes.add_table(nrows,ncols,tx,ty,tw,th).table
+    try: tbl.first_row=False; tbl.horz_banding=False
+    except Exception: pass
+    tbl.columns[0].width=Inches(1.85); tbl.columns[1].width=Inches(1.6)
+    rest=int((tw-Inches(1.85)-Inches(1.6))/len(dates))
+    for c in range(2,ncols): tbl.columns[c].width=rest
+
+    def style(cell,text,bg,fg=black,bold=False,sz=9,align=PP_ALIGN.CENTER):
+        cell.fill.solid(); cell.fill.fore_color.rgb=bg
+        try: cell.vertical_anchor=MSO_ANCHOR.MIDDLE
+        except Exception: pass
+        cell.margin_left=Inches(0.04); cell.margin_right=Inches(0.04)
+        cell.margin_top=Inches(0.01); cell.margin_bottom=Inches(0.01)
+        cell.text=str(text)
+        para=cell.text_frame.paragraphs[0]; para.alignment=align
+        for rr in para.runs:
+            rr.font.size=Pt(sz); rr.font.bold=bold; rr.font.color.rgb=fg
+
+    headers=["Transaction Type","MileStone"]+[_short(d) for d in dates]
+    for c,h in enumerate(headers):
+        style(tbl.cell(0,c),h,hdr_bg,fg=white,bold=True,sz=FS+1,align=PP_ALIGN.CENTER)
+
+    r=1
+    for (txn,mlabel,col,rows,k) in rows_spec:
+        style(tbl.cell(r,0), (txn if k==0 else ""), txn_bg, bold=True, sz=FS, align=PP_ALIGN.CENTER)
+        style(tbl.cell(r,1), mlabel, label_color.get(mlabel,neutral), bold=False, sz=FS, align=PP_ALIGN.CENTER)
+        for j,d in enumerate(dates):
+            vv=_val(rows,d,col)
+            style(tbl.cell(r,2+j), vv, (datafill if vv>0 else white), bold=False, sz=FS)
+        r+=1
+
+    # merge TXN Type column per group
+    r=1
+    for txn,miles,rows in spec:
+        n=len(miles)
+        if n>1:
+            try: tbl.cell(r,0).merge(tbl.cell(r+n-1,0))
+            except Exception: pass
+        r+=n
+    # distribute row heights to fill the table area (less empty space)
+    try:
+        rh=int(th/nrows)
+        for rr in tbl.rows: rr.height=rh
+    except Exception: pass
+    return slide
+
+def generate_slide(html_list, report_date, output_path, data=None, png_path=None, table_png_path=None):
     if data is None:
         if isinstance(html_list, str): html_list=[html_list]
         data=merge_data(html_list)
@@ -642,6 +854,7 @@ def generate_slide(html_list, report_date, output_path, data=None, png_path=None
         _txt(slide,"CONFIDENTIAL",SW-Inches(2.4),SH-Inches(0.24),Inches(2.3),Inches(0.20),
              sz=7.5,col=LGREY,align=PP_ALIGN.RIGHT,italic=True)
 
+        add_trend_table_slide(prs, data, rd)
         prs.save(output_path)
         print(f"Saved: {output_path}")
         if png_path:
@@ -649,6 +862,11 @@ def generate_slide(html_list, report_date, output_path, data=None, png_path=None
                 render_dashboard_png(data, rd, png_path)
             except Exception as e:
                 print("WARN: dashboard PNG render failed:", e)
+        if table_png_path:
+            try:
+                render_table_png(data, rd, table_png_path)
+            except Exception as e:
+                print("WARN: table PNG render failed:", e)
 
     return output_path
 
@@ -663,16 +881,17 @@ if __name__=="__main__":
     parser.add_argument("--html",help="Single HTML string")
     parser.add_argument("--date",default="",help="Report date YYYY-MM-DD")
     parser.add_argument("--output",required=True,help="Output .pptx path")
-    parser.add_argument("--png",default="",help="Also render the dashboard as a PNG at this path")
+    parser.add_argument("--png",default="",help="Also render the dashboard (slide 1) as a PNG")
+    parser.add_argument("--table-png",default="",help="Also render the trend table (slide 2) as a PNG")
     args=parser.parse_args()
     if args.csv_file:
         print("Building from latest mail CSV attachments:")
         data=csv_to_data(args.csv_file, args.date)
-        generate_slide(None, args.date, args.output, data=data, png_path=(args.png or None))
+        generate_slide(None, args.date, args.output, data=data, png_path=(args.png or None), table_png_path=(args.table_png or None))
     elif args.html_file:
         html_list=[Path(f).read_text(encoding="utf-8") for f in args.html_file]
-        generate_slide(html_list, args.date, args.output, png_path=(args.png or None))
+        generate_slide(html_list, args.date, args.output, png_path=(args.png or None), table_png_path=(args.table_png or None))
     elif args.html:
-        generate_slide([args.html], args.date, args.output, png_path=(args.png or None))
+        generate_slide([args.html], args.date, args.output, png_path=(args.png or None), table_png_path=(args.table_png or None))
     else:
         parser.error("Provide --csv-file, --html-file, or --html")

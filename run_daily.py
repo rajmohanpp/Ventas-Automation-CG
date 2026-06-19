@@ -60,7 +60,9 @@ ENV_TO     = os.environ.get("MAIL_TO",  "")
 ENV_CC     = os.environ.get("MAIL_CC",  "")
 ENV_BCC    = os.environ.get("MAIL_BCC", "")
 MIME_PPTX  = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-INLINE_CID = "ventas_slide"
+INLINE_CID  = "ventas_slide"
+INLINE_CID1 = "ventas_slide1"
+INLINE_CID2 = "ventas_slide2"
 
 
 def check_connectivity(timeout=8):
@@ -280,14 +282,20 @@ def _pick(paths, key):
 
 
 # -- 2. generate --
-def generate(csv_paths, report_date, out_path, png_path=None):
+def generate(csv_paths, report_date, out_path, png_path=None, table_png_path=None):
     pri = _pick(csv_paths, "PRIMARY"); pos = _pick(csv_paths, "POS")
     stk = _pick(csv_paths, "STOCK") or _pick(csv_paths, "TRANSFER")
     args = [sys.executable, str(GENERATOR), "--csv-file"]
-    args += [p for p in (pri, pos, stk) if p]
+    # pass EVERY downloaded CSV so all summary sections are included; keep the
+    # three core ones first so slide-1 classification is unambiguous.
+    core=[p for p in (pri, pos, stk) if p]
+    extra=[str(p) for p in csv_paths if str(p) not in core]
+    args += core + extra
     args += ["--date", report_date, "--output", str(out_path)]
     if png_path:
         args += ["--png", str(png_path)]
+    if table_png_path:
+        args += ["--table-png", str(table_png_path)]
     print("Generating deck:", " ".join(args))
     subprocess.check_call(args, cwd=str(HERE))
     return out_path
@@ -308,7 +316,7 @@ def upload_drive(creds, path, folder_id=DRIVE_FOLDER_ID):
 
 # -- 4. send email (inline slide image + pptx attachment) --
 def send_email(gmail, to_list, subject, html, attach_path,
-               cc_list=None, bcc_list=None, inline_png=None):
+               cc_list=None, bcc_list=None, inline_imgs=None):
     outer = MIMEMultipart("mixed")
     outer["to"] = ", ".join(to_list)
     if cc_list:
@@ -319,11 +327,12 @@ def send_email(gmail, to_list, subject, html, attach_path,
 
     related = MIMEMultipart("related")
     related.attach(MIMEText(html, "html"))
-    if inline_png and Path(inline_png).exists():
-        img = MIMEImage(Path(inline_png).read_bytes(), _subtype="png")
-        img.add_header("Content-ID", f"<{INLINE_CID}>")
-        img.add_header("Content-Disposition", "inline", filename=Path(inline_png).name)
-        related.attach(img)
+    for cid, png in (inline_imgs or []):
+        if png and Path(png).exists():
+            img = MIMEImage(Path(png).read_bytes(), _subtype="png")
+            img.add_header("Content-ID", f"<{cid}>")
+            img.add_header("Content-Disposition", "inline", filename=Path(png).name)
+            related.attach(img)
     outer.attach(related)
 
     part = MIMEBase(*MIME_PPTX.split("/"))
@@ -339,17 +348,19 @@ def send_email(gmail, to_list, subject, html, attach_path,
     return sent.get("id")
 
 
-def _email_html(report_date, drive_link=None, has_image=False):
+def _email_html(report_date, drive_link=None, images=None):
     link = f'<p>Drive copy: <a href="{drive_link}">{drive_link}</a></p>' if drive_link else ""
-    img = (f'<p><img src="cid:{INLINE_CID}" alt="Ventas Daily Dashboard" '
-           f'style="width:100%;max-width:900px;border:1px solid #ddd;border-radius:4px;"></p>'
-           if has_image else "")
+    blocks = ""
+    for cid, label in (images or []):
+        blocks += (f'<p style="margin:16px 0 4px;font-weight:bold;color:#0E518C;font-size:14px;">{label}</p>'
+                   f'<p><img src="cid:{cid}" alt="{label}" '
+                   f'style="width:100%;max-width:1000px;border:1px solid #ddd;border-radius:4px;"></p>')
     return f"""\
 <div style="font-family:Arial,sans-serif;color:#0A2A57;">
   <h2 style="color:#0E518C;margin-bottom:4px;">Ventas Daily Dashboard</h2>
   <p style="margin:2px 0;color:#444;">Airtel Congo (CG) &nbsp;|&nbsp; Report date {report_date} &nbsp;|&nbsp; Last 7 days (excl. report day)</p>
-  <p>Please find the Ventas USDM 2.0 daily dashboard below (Primary Sales, POS Sales, Stock Transfer). The editable deck is attached.</p>
-  {img}
+  <p>Please find the Ventas USDM 2.0 daily report below. The editable deck is attached.</p>
+  {blocks}
   {link}
   <p style="color:#888;font-size:12px;">Generated automatically by Ventas USDM 2.0.</p>
 </div>"""
@@ -385,16 +396,19 @@ def main():
     csv_dir, rd, csvs = fetch_latest(gmail, args.query)
     report_date = args.date or rd
     out = WORKDIR / f"Ventas_Dashboard_{report_date}.pptx"
-    png_out = WORKDIR / f"Ventas_Dashboard_{report_date}.png"
-    generate(csvs, report_date, out, png_path=(None if args.no_image else png_out))
+    png1 = WORKDIR / f"Ventas_Dashboard_{report_date}_slide1.png"   # dashboard
+    png2 = WORKDIR / f"Ventas_Dashboard_{report_date}_slide2.png"   # trend table
+    generate(csvs, report_date, out,
+             png_path=(None if args.no_image else png1),
+             table_png_path=(None if args.no_image else png2))
 
-    slide_png = None
+    images = []        # (cid, label, path) for inline embedding
     if not args.no_image:
-        if png_out.exists():
-            slide_png = png_out            # matplotlib-rendered (no LibreOffice)
-            print("Inline image: matplotlib dashboard PNG.")
-        else:
-            slide_png = slide_to_png(out, png_out)   # fallback (PowerPoint/LibreOffice)
+        if not png1.exists():
+            slide_to_png(out, png1)   # fallback to PowerPoint/LibreOffice for slide 1
+        if png1.exists(): images.append((INLINE_CID1, "Daily Dashboard", png1))
+        if png2.exists(): images.append((INLINE_CID2, "Weekly Transaction Trend", png2))
+        print("Inline images:", [str(p) for _,_,p in images])
 
     drive_link = None
     if not args.no_drive:
@@ -407,8 +421,9 @@ def main():
     cc_list  = [a.strip() for a in args.cc.split(",")  if a.strip()]
     bcc_list = [a.strip() for a in args.bcc.split(",") if a.strip()]
     subject = f"Ventas Daily Dashboard | Airtel Congo (CG) | {report_date} (Last 7 Days)"
-    html = _email_html(report_date, drive_link, has_image=bool(slide_png))
-    send_email(gmail, to_list, subject, html, out, cc_list, bcc_list, inline_png=slide_png)
+    html = _email_html(report_date, drive_link, images=[(c,l) for c,l,_ in images])
+    send_email(gmail, to_list, subject, html, out, cc_list, bcc_list,
+               inline_imgs=[(c,p) for c,_,p in images])
     print("DONE.")
 
 
