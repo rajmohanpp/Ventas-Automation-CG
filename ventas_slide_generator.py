@@ -587,15 +587,18 @@ def render_table_png(data, rd, out_png, dpi=150):
         spec.append((_txn, list(_metrics), data.get(_name, [])))
     spec.sort(key=lambda t: 0 if t[0]=="User Login" else 1)
 
+    TINTS=["#EAF1FB","#E8F5E9","#FFF3E0","#F3E5F5","#E0F7FA","#FCE4EC","#F9FBE7","#EDE7F6","#FFF8E1"]  # unique per group
     headers=["Transaction Type","MileStone"]+[_short(d) for d in dates]
-    cellText=[headers]; cellColours=[[hdrc]*len(headers)]; rowmeta=[("hdr",0)]
+    cellText=[headers]; cellColours=[[hdrc]*len(headers)]
+    gi=0
     for txn,miles,rows in spec:
+        tint=TINTS[gi%len(TINTS)]; gi+=1
         n=len(miles); mid=n//2
         for k,(mlabel,col) in enumerate(miles):
-            txt=[(txn if k==mid else ""), mlabel]; cols=[txn_bg, label_color.get(mlabel,neutral)]
+            txt=[(txn if k==mid else ""), mlabel]; cols=[tint, label_color.get(mlabel,neutral)]
             for d in dates:
-                vv=_val(rows,d,col); txt.append(str(vv)); cols.append(datafill if vv>0 else white)
-            cellText.append(txt); cellColours.append(cols); rowmeta.append(("data",0))
+                vv=_val(rows,d,col); txt.append(str(vv)); cols.append(datafill if vv>0 else tint)
+            cellText.append(txt); cellColours.append(cols)
     nrows=len(cellText)
 
     fig=plt.figure(figsize=(13.333,7.5),dpi=dpi); fig.patch.set_facecolor("#06224A")
@@ -697,13 +700,18 @@ def add_trend_table_slide(prs, data, rd):
     for c,h in enumerate(headers):
         style(tbl.cell(0,c),h,hdr_bg,fg=white,bold=True,sz=FS+1,align=PP_ALIGN.CENTER)
 
-    r=1
+    TINTS=[RGBColor(0xEA,0xF1,0xFB),RGBColor(0xE8,0xF5,0xE9),RGBColor(0xFF,0xF3,0xE0),
+           RGBColor(0xF3,0xE5,0xF5),RGBColor(0xE0,0xF7,0xFA),RGBColor(0xFC,0xE4,0xEC),
+           RGBColor(0xF9,0xFB,0xE7),RGBColor(0xED,0xE7,0xF6),RGBColor(0xFF,0xF8,0xE1)]
+    r=1; gi=-1
     for (txn,mlabel,col,rows,k) in rows_spec:
-        style(tbl.cell(r,0), (txn if k==0 else ""), txn_bg, bold=True, sz=FS, align=PP_ALIGN.CENTER)
+        if k==0: gi+=1
+        tint=TINTS[gi%len(TINTS)]
+        style(tbl.cell(r,0), (txn if k==0 else ""), tint, bold=True, sz=FS, align=PP_ALIGN.CENTER)
         style(tbl.cell(r,1), mlabel, label_color.get(mlabel,neutral), bold=False, sz=FS, align=PP_ALIGN.CENTER)
         for j,d in enumerate(dates):
             vv=_val(rows,d,col)
-            style(tbl.cell(r,2+j), vv, (datafill if vv>0 else white), bold=False, sz=FS)
+            style(tbl.cell(r,2+j), vv, (datafill if vv>0 else tint), bold=False, sz=FS)
         r+=1
 
     # merge TXN Type column per group
@@ -715,8 +723,8 @@ def add_trend_table_slide(prs, data, rd):
             except Exception: pass
         r+=n
     # distribute row heights to fill the table area (less empty space)
+    rh=int(th/nrows)
     try:
-        rh=int(th/nrows)
         for rr in tbl.rows: rr.height=rh
     except Exception: pass
     return slide
