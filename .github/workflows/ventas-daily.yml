@@ -3,7 +3,7 @@ name: Ventas Daily Dashboard
 # 10:00 IST = 04:30 UTC. GitHub cron is always UTC.
 on:
   schedule:
-    - cron: "30 4 * * *"
+    - cron: "30 0 * * *"
   workflow_dispatch: {}        # adds a manual "Run workflow" button
 
 jobs:
